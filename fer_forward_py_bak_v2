@@ -1,0 +1,103 @@
+#coding:utf-8
+
+#第二个版本，其他先不动，先看dropout和过拟合的关系。
+#比前一个版本降低dropout。0.5小了点，可以0.8,三层0.8,接近0.5。
+#
+import tensorflow as tf
+
+NUM_CHANNELS=1
+CONV1_KSIZE=5
+CONV1_OUTPUT_CHANNEL=64
+CONV2_KSIZE=5
+CONV2_OUTPUT_CHANNEL=64
+CONV3_KSIZE=5
+CONV3_OUTPUT_CHANNEL=128
+
+#记得他们演讲说自己做的叫做lenet-7,从这个参数看，卷积层确实多了一层，FC没多，不过他FC都按同一个SIZE做的，MOOC这一套都是用的等宽FC。
+#其实更像照着alexnet改的，如果是alexnet，norm全在pooling之后
+
+FC_SIZE=512
+
+#输出，7分类
+OUTPUT_NODE=7
+
+
+#形状，数据stddev，正则化系数
+def variable_with_weight_loss(shape, std, w1,name):
+    var = tf.Variable(tf.truncated_normal(shape, stddev = std), dtype=tf.float32, name = name)
+    if w1 is not None:
+        #这里不给每一个变量单独命名的话，graph看就是一个重名数组，有很多断点
+        weight_loss = tf.multiply(tf.nn.l2_loss(var), w1, name=name+'_weight_loss')
+        tf.add_to_collection('regularization_losses', weight_loss)
+    return var
+
+# 卷积层
+def conv2d(x, w,name):
+    return tf.nn.conv2d(x, w, strides=[1,1,1,1], padding='SAME',name=name)
+#池化层:带重叠的
+def max_pooling_2x2(x,name):
+    return tf.nn.max_pool(x, ksize=[1,3,3,1], strides=[1,2,2,1], padding='SAME',name=name)
+
+
+
+
+
+#这个网络号称lenet-7，算是lenet和alexnet之中抄来的吧。
+#原代码的问题，第一层的norm再最后，其他两层norm在pool前，但是都不再relu前，因为不是BN，所以确实不是relu前。
+#别人说的lrn应该是relu和pooling之后，也就是说他这有写错！！！！！！！！
+#还有，第一个norm用的alpha也不同
+#todo：或者干脆换成BN可不可以？可以尝试对比一下，如果训练时间可接受
+
+#todo：对比，这个顺序有疑问的lrn，和标准顺序的lrn，和BN替换
+
+def forward(x, train):
+    conv1_w = variable_with_weight_loss(
+        shape=[CONV1_KSIZE,CONV1_KSIZE,NUM_CHANNELS,CONV1_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv1_w')
+    conv1_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV1_OUTPUT_CHANNEL]),name='conv1_b')
+    conv1 = conv2d(x,conv1_w,'conv1')
+    relu1 = tf.nn.relu(tf.nn.bias_add(conv1,conv1_b,name='bias_add_before_relu1'), name='relu1')
+    pool1 = max_pooling_2x2(relu1,name='pool1')
+    norm1 = tf.nn.lrn(pool1,4,bias=1.0,alpha=0.001/9,beta=0.75,name='norm1')#
+    
+    conv2_w = variable_with_weight_loss(
+        shape=[CONV2_KSIZE,CONV2_KSIZE,CONV1_OUTPUT_CHANNEL, CONV2_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv2_w')
+    conv2_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV2_OUTPUT_CHANNEL]),name='conv2_b')
+    conv2 = conv2d(norm1, conv2_w,'conv2')
+    relu2 = tf.nn.relu(tf.nn.bias_add(conv2,conv2_b,name='bias_add_before_relu2'), name='relu2')#bias_add是可以重名的，但是如果不改名，图是断的。另一方面，restore模型也不是很方便，出问题不好调。
+    norm2 = tf.nn.lrn(relu2, 4, bias=1.0, alpha=0.01 / 9, beta=0.75,name='norm2')
+    pool2 = max_pooling_2x2(norm2,name='pool2')
+    
+    conv3_w = variable_with_weight_loss(
+        shape=[CONV3_KSIZE, CONV3_KSIZE,CONV2_OUTPUT_CHANNEL,CONV3_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv3_w')
+    conv3_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV3_OUTPUT_CHANNEL]),name='conv3_b')
+    conv3 = conv2d(pool2, conv3_w,'conv1')
+    relu3= tf.nn.relu(tf.nn.bias_add(conv3, conv3_b,name='bias_add_before_relu3'), name='relu3')
+    norm3 = tf.nn.lrn(relu3, 4, bias=1.0, alpha=0.01/9, beta=0.75,name='norm3')
+    pool3 = max_pooling_2x2(norm3,name='pool3')
+    
+    if train:
+        pool3 = tf.nn.dropout(pool3, 0.8)
+    #FC层
+    pool3_shape = pool3.get_shape().as_list()
+    nodes = pool3_shape[1] * pool3_shape[2] * pool3_shape[3]
+    reshaped = tf.reshape(pool3, [-1, nodes])
+    
+    w1 = variable_with_weight_loss(shape=[nodes,FC_SIZE],std=0.04,w1=0.004,name='fc1_w')
+    b1 = tf.Variable(tf.constant(0.1, shape=[FC_SIZE], dtype=tf.float32),name='fc2_b')
+    y1 = tf.nn.relu(tf.nn.bias_add(tf.matmul(reshaped, w1), b1,name='bias_add_before_y1'),name='y1')#FC这是一对一了，也不用bias_add了，但是如果用，也不会错。
+    if train:
+        y1 = tf.nn.dropout(y1,0.8)
+    
+    w2 = variable_with_weight_loss(shape=[FC_SIZE, FC_SIZE], std=0.04, w1=0.004,name='fc2_w')
+    b2 = tf.Variable(tf.constant(0.1,shape=[FC_SIZE], dtype=tf.float32),name='fc2_b')
+    y2 = tf.nn.relu(tf.nn.bias_add(tf.matmul(y1, w2), b2,name='bias_add_before_y2'),name='y2')
+    if train:
+        y2 = tf.nn.dropout(y2,0.8)
+    
+    w3 = variable_with_weight_loss(shape=[FC_SIZE,OUTPUT_NODE], std=1.0 / FC_SIZE, w1 = 0,name='fc3_w')#这层不正则
+#     b3 = tf.Variable(tf.constant(0.1, shape=[OUTPUT_NODE], dtype=tf.float32))#差别大吗？
+    b3 = tf.Variable(tf.zeros(shape=[OUTPUT_NODE], dtype=tf.float32),name='fc3_b')
+    y3 = tf.add(tf.matmul(y2,w3) ,b3, name='prediction')
+    return y3
+
+

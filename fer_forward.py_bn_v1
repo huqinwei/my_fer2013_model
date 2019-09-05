@@ -1,0 +1,96 @@
+#coding:utf-8
+
+#lenet-5改，其实更像照着alexnet改的，如果是alexnet，norm全在pooling之后
+#bias_add是可以重名的，但是如果不改名，图是断的。另一方面，restore模型也不是很方便，出问题不好调。
+#第三个版本，dropout做完后，不急调整dropout率，开始改LRN为BN
+#把LRN改成BN，BN放激活之前。
+import tensorflow as tf
+
+NUM_CHANNELS=1
+CONV1_KSIZE=5
+CONV1_OUTPUT_CHANNEL=64
+CONV2_KSIZE=5
+CONV2_OUTPUT_CHANNEL=64
+CONV3_KSIZE=5
+CONV3_OUTPUT_CHANNEL=128
+
+
+
+
+FC_SIZE=512
+
+#输出，7分类
+OUTPUT_NODE=7
+
+
+#形状，数据stddev，正则化系数
+def variable_with_weight_loss(shape, std, w1,name):
+    var = tf.Variable(tf.truncated_normal(shape, stddev = std), dtype=tf.float32, name = name)
+    if w1 is not None:
+        #这里不给每一个变量单独命名的话，graph看就是一个重名数组，有很多断点
+        weight_loss = tf.multiply(tf.nn.l2_loss(var), w1, name=name+'_weight_loss')
+        tf.add_to_collection('regularization_losses', weight_loss)
+    return var
+
+# 卷积层
+def conv2d(x, w,name):
+    return tf.nn.conv2d(x, w, strides=[1,1,1,1], padding='SAME',name=name)
+#池化层:带重叠的
+def max_pooling_2x2(x,name):
+    return tf.nn.max_pool(x, ksize=[1,3,3,1], strides=[1,2,2,1], padding='SAME',name=name)
+
+
+
+def forward(x, train):
+    conv1_w = variable_with_weight_loss(
+        shape=[CONV1_KSIZE,CONV1_KSIZE,NUM_CHANNELS,CONV1_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv1_w')
+    conv1_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV1_OUTPUT_CHANNEL]),name='conv1_b')
+    conv1 = conv2d(x,conv1_w,'conv1')
+    bn1 = tf.layers.batch_normalization(tf.nn.bias_add(conv1,conv1_b,name='bias_add_before_bn1'),name='bn1')
+    relu1 = tf.nn.relu(bn1, name='relu1')
+    pool1 = max_pooling_2x2(relu1,name='pool1')
+    
+    conv2_w = variable_with_weight_loss(
+        shape=[CONV2_KSIZE,CONV2_KSIZE,CONV1_OUTPUT_CHANNEL, CONV2_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv2_w')
+    conv2_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV2_OUTPUT_CHANNEL]),name='conv2_b')
+    conv2 = conv2d(pool1, conv2_w,'conv2')
+    bn2 = tf.layers.batch_normalization(tf.nn.bias_add(conv2,conv2_b,name='bias_add_before_bn2'),name='bn2')
+    relu2 = tf.nn.relu(bn2, name='relu2')
+    pool2 = max_pooling_2x2(relu2,name='pool2')
+    
+    
+    conv3_w = variable_with_weight_loss(
+        shape=[CONV3_KSIZE, CONV3_KSIZE,CONV2_OUTPUT_CHANNEL,CONV3_OUTPUT_CHANNEL],std=0.05,w1=0,name='conv3_w')
+    conv3_b = tf.Variable(tf.constant(0.0, dtype = tf.float32, shape=[CONV3_OUTPUT_CHANNEL]),name='conv3_b')
+    conv3 = conv2d(pool2, conv3_w,'conv1')
+    
+    bn3 = tf.layers.batch_normalization(tf.nn.bias_add(conv3,conv3_b,name='bias_add_before_bn3'),name='bn3')
+    relu3 = tf.nn.relu(bn3, name='relu3')
+    pool3 = max_pooling_2x2(relu3,name='pool3')
+    
+    if train:
+        pool3 = tf.nn.dropout(pool3, 0.6)
+    #FC层
+    pool3_shape = pool3.get_shape().as_list()
+    nodes = pool3_shape[1] * pool3_shape[2] * pool3_shape[3]
+    reshaped = tf.reshape(pool3, [-1, nodes])
+    
+    w1 = variable_with_weight_loss(shape=[nodes,FC_SIZE],std=0.04,w1=0.004,name='fc1_w')
+    b1 = tf.Variable(tf.constant(0.1, shape=[FC_SIZE], dtype=tf.float32),name='fc2_b')
+    y1 = tf.nn.relu(tf.nn.bias_add(tf.matmul(reshaped, w1), b1,name='bias_add_before_y1'),name='y1')#FC这是一对一了，也不用bias_add了，但是如果用，也不会错。
+    if train:
+        y1 = tf.nn.dropout(y1,0.6)
+    
+    w2 = variable_with_weight_loss(shape=[FC_SIZE, FC_SIZE], std=0.04, w1=0.004,name='fc2_w')
+    b2 = tf.Variable(tf.constant(0.1,shape=[FC_SIZE], dtype=tf.float32),name='fc2_b')
+    y2 = tf.nn.relu(tf.nn.bias_add(tf.matmul(y1, w2), b2,name='bias_add_before_y2'),name='y2')
+    if train:
+        y2 = tf.nn.dropout(y2,0.6)
+    
+    w3 = variable_with_weight_loss(shape=[FC_SIZE,OUTPUT_NODE], std=1.0 / FC_SIZE, w1 = 0,name='fc3_w')#这层不正则
+#     b3 = tf.Variable(tf.constant(0.1, shape=[OUTPUT_NODE], dtype=tf.float32))#差别大吗？
+    b3 = tf.Variable(tf.zeros(shape=[OUTPUT_NODE], dtype=tf.float32),name='fc3_b')
+    y3 = tf.add(tf.matmul(y2,w3) ,b3, name='prediction')
+    return y3
+
+

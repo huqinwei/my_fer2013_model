@@ -1,0 +1,2 @@
+model_checkpoint_path: "BN_variables_save2.ckpt"
+all_model_checkpoint_paths: "BN_variables_save2.ckpt"
